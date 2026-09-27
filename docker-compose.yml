@@ -1,0 +1,28 @@
+services:
+  web:
+    image: jd-backend:latest
+    container_name: fastapi_app
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+
+  db:
+    image: postgres:15-alpine
+    container_name: postgres_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: jobcomparisonai
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+volumes:
+  postgres_data:
