@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Mapping, Optional, Sequence
 
 from pydantic import BaseModel, Field
 
@@ -55,6 +55,15 @@ class _ConceptOut(BaseModel):
 
 class _ClusteringResponse(BaseModel):
     concepts: List[_ConceptOut] = Field(default_factory=list)
+
+
+class _CategoryClusteringOut(BaseModel):
+    category: Category
+    concepts: List[_ConceptOut] = Field(default_factory=list)
+
+
+class _GroupClusteringResponse(BaseModel):
+    categories: List[_CategoryClusteringOut] = Field(default_factory=list)
 
 
 # ==========================================================================
@@ -324,4 +333,77 @@ def cluster_category(
     return result
 
 
-__all__ = ["cluster_category"]
+def cluster_categories(
+    grouped_items: Mapping[Category, Sequence[SourceItem]],
+    gateway: Optional[object] = None,
+) -> Dict[Category, ConceptClusteringResult]:
+    """Cluster every populated category in one grounded model request.
+
+    Empty and single-item categories never need the model.  If the combined
+    request fails or omits a category, only that category falls back to the
+    deterministic clusterer, preserving the same coverage guarantees as
+    :func:`cluster_category`.
+    """
+
+    results: Dict[Category, ConceptClusteringResult] = {}
+    batched: Dict[Category, List[SourceItem]] = {}
+
+    for category in Category:
+        items = list(grouped_items.get(category, []))
+        if len(items) <= 1 or gateway is None:
+            results[category] = cluster_category(
+                category=category,
+                items=items,
+                gateway=gateway,
+            )
+        else:
+            batched[category] = items
+
+    if not batched:
+        return results
+
+    sections = [
+        build_clustering_user_content(category, items)
+        for category, items in batched.items()
+    ]
+    user_content = (
+        "Cluster every category below independently. Never place item ids "
+        "from different categories in the same concept. Return one "
+        "categories entry for every CATEGORY section.\n\n"
+        + "\n\n==============================\n\n".join(sections)
+    )
+
+    try:
+        payload = gateway.generate_json(
+            system_instruction=CLUSTERING_SYSTEM_INSTRUCTION,
+            user_content=user_content,
+            response_schema=_GroupClusteringResponse,
+            label="clustering[group]",
+        )
+        parsed = _GroupClusteringResponse.model_validate(payload)
+        returned = {entry.category: entry for entry in parsed.categories}
+    except (LLMUnavailable, Exception) as exc:  # noqa: B014
+        logger.warning("Group clustering used deterministic fallback: %s", exc)
+        returned = {}
+
+    for category, items in batched.items():
+        entry = returned.get(category)
+
+        if entry is None:
+            fallback = cluster_category(category, items, gateway=None)
+            fallback.notes.append(
+                "Combined semantic clustering did not return this category."
+            )
+            results[category] = fallback
+            continue
+
+        results[category] = _validate_and_repair(
+            category,
+            items,
+            entry.concepts,
+        )
+
+    return results
+
+
+__all__ = ["cluster_category", "cluster_categories"]

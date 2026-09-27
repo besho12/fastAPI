@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.comparison_engine.concepts import cluster_category
+from app.comparison_engine.concepts import cluster_categories
 from app.comparison_engine.engine import ComparisonEngine
 from app.comparison_engine.evidence import (
     MIN_DOCS_FOR_STATISTICAL_CLAIM,
@@ -79,15 +79,15 @@ class GroupComparisonEngine:
         grouped_items = items_by_category(corpus_items)
 
         shared_diagnostics = EngineDiagnostics()
-        clusterings: Dict[Category, ConceptClusteringResult] = {}
-
-        for category in CATEGORY_ORDER:
-            clustering = cluster_category(
-                category=category,
-                items=grouped_items.get(category, []),
+        clusterings: Dict[Category, ConceptClusteringResult] = (
+            cluster_categories(
+                grouped_items=grouped_items,
                 gateway=self.gateway,
             )
-            clusterings[category] = clustering
+        )
+
+        for category in CATEGORY_ORDER:
+            clustering = clusterings[category]
             if clustering.used_fallback:
                 shared_diagnostics.categories_using_fallback.append(
                     category.value

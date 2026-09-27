@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
 import time
 from typing import Any, Dict, Optional
@@ -26,7 +27,16 @@ logger = logging.getLogger(__name__)
 # Deterministic-as-possible settings.
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_SEED = 7
-DEFAULT_MAX_ATTEMPTS = 3
+DEFAULT_MAX_ATTEMPTS = 1
+
+
+def _comparison_timeout_ms() -> int:
+    raw_value = os.getenv("GEMINI_COMPARISON_TIMEOUT_SECONDS", "20")
+    try:
+        seconds = int(raw_value)
+    except (TypeError, ValueError):
+        seconds = 20
+    return max(5, seconds) * 1000
 
 
 class LLMUnavailable(RuntimeError):
@@ -70,15 +80,11 @@ class GeminiGateway:
             raise LLMUnavailable("GEMINI_API_KEY is not configured.")
 
         self._genai = genai
+        self._api_key = api_key
         self.model = model
         self.temperature = temperature
         self.seed = seed
         self.max_attempts = max(1, max_attempts)
-
-        try:
-            self.client = genai.Client(api_key=api_key)
-        except Exception as exc:  # pragma: no cover
-            raise LLMUnavailable("Failed to initialise Gemini client.") from exc
 
         self.call_count = 0
         self.failure_count = 0
@@ -108,20 +114,38 @@ class GeminiGateway:
             self.call_count += 1
 
             try:
-                response = self.client.models.generate_content(
-                    model=self.model,
-                    contents=content,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_instruction,
-                        temperature=self.temperature,
-                        seed=self.seed,
-                        response_mime_type="application/json",
-                        response_schema=response_schema,
-                        automatic_function_calling=(
-                            types.AutomaticFunctionCallingConfig(disable=True)
+                model_name = str(self.model or "").lower()
+                thinking_config = None
+                if model_name.startswith("gemini-3"):
+                    thinking_config = types.ThinkingConfig(
+                        thinking_level=types.ThinkingLevel.MINIMAL,
+                    )
+                elif "gemini-2.5-flash" in model_name:
+                    thinking_config = types.ThinkingConfig(
+                        thinking_budget=0,
+                    )
+
+                with self._genai.Client(api_key=self._api_key) as client:
+                    response = client.models.generate_content(
+                        model=self.model,
+                        contents=content,
+                        config=types.GenerateContentConfig(
+                            system_instruction=system_instruction,
+                            temperature=self.temperature,
+                            seed=self.seed,
+                            response_mime_type="application/json",
+                            response_schema=response_schema,
+                            thinking_config=thinking_config,
+                            automatic_function_calling=(
+                                types.AutomaticFunctionCallingConfig(
+                                    disable=True
+                                )
+                            ),
+                            http_options=types.HttpOptions(
+                                timeout=_comparison_timeout_ms(),
+                            ),
                         ),
-                    ),
-                )
+                    )
 
                 parsed = getattr(response, "parsed", None)
 

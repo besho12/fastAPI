@@ -52,8 +52,10 @@ from app.comparison_engine.prompts import (
 
 logger = logging.getLogger(__name__)
 
-# Gaps are rated in batches so one oversized request cannot fail the lot.
-MATERIALITY_BATCH_SIZE = 25
+# A normal job-code group should require one materiality request.  Keeping a
+# generous ceiling still protects unusually large groups without turning a
+# three-document comparison into several sequential network round trips.
+MATERIALITY_BATCH_SIZE = 100
 
 
 # ==========================================================================

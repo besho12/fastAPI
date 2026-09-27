@@ -116,30 +116,49 @@ class _CountingGateway:
     ):
         self.labels.append(label)
         self.call_count += 1
-        if label.startswith("clustering"):
-            ids = list(
-                dict.fromkeys(
-                    re.findall(r"[A-Z]{3}-D\d{2}-\d{2}", user_content)
+        if label == "clustering[group]":
+            categories = []
+            prefix_to_category = {
+                "LNG": "Language",
+                "CMP": "Computer Skills",
+            }
+            for prefix, category in prefix_to_category.items():
+                ids = list(
+                    dict.fromkeys(
+                        re.findall(
+                            rf"{prefix}-D\d{{2}}-\d{{2}}",
+                            user_content,
+                        )
+                    )
                 )
-            )
+                if not ids:
+                    continue
+                categories.append(
+                    {
+                        "category": category,
+                        "concepts": [
+                            {
+                                "label": item_id,
+                                "member_item_ids": [item_id],
+                            }
+                            for item_id in ids
+                        ],
+                    }
+                )
             return {
-                "concepts": [
-                    {"label": item_id, "member_item_ids": [item_id]}
-                    for item_id in ids
-                ]
+                "categories": categories,
             }
         return {"verdicts": []}
 
 
-def test_semantic_clustering_runs_once_per_populated_category_for_group():
+def test_semantic_clustering_uses_one_request_for_the_whole_group():
     gateway = _CountingGateway()
     GroupComparisonEngine(gateway=gateway).run(_three_jobs())
 
     clustering_calls = [
         label for label in gateway.labels if label.startswith("clustering")
     ]
-    assert len(clustering_calls) == 2  # Language + Computer Skills
-    assert len(set(clustering_calls)) == 2
+    assert clustering_calls == ["clustering[group]"]
     assert gateway.labels.count("materiality") == 1
 
 
