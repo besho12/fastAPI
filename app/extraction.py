@@ -5,6 +5,8 @@ extraction.py
 
 from __future__ import annotations
 
+import os
+
 from typing import Optional
 
 from app.rate_limiter import call_gemini_with_retry
@@ -27,7 +29,17 @@ from app.schemas import (
 )
 
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+def _gemini_timeout_ms() -> int:
+    """Return a request deadline that finishes before the HTTP proxy."""
+
+    raw_value = os.getenv("GEMINI_REQUEST_TIMEOUT_SECONDS", "45")
+
+    try:
+        seconds = int(raw_value)
+    except (TypeError, ValueError):
+        seconds = 45
+
+    return max(5, seconds) * 1000
 
 
 EXTRACTION_PROMPT = """
@@ -997,6 +1009,38 @@ class ExtractionService:
     ) -> None:
         self.model = model or GEMINI_MODEL
 
+    def _generation_config(self) -> types.GenerateContentConfig:
+        """Build a low-latency, bounded configuration for extraction."""
+
+        model_name = str(self.model or "").lower()
+        thinking_config = None
+
+        # Extraction is a faithful schema-mapping task, not an open-ended
+        # reasoning task.  Avoid spending the proxy's request budget on
+        # model thinking.  Gemini 3 uses levels; Gemini 2.5 Flash uses a
+        # numeric budget.
+        if model_name.startswith("gemini-3"):
+            thinking_config = types.ThinkingConfig(
+                thinking_level=types.ThinkingLevel.MINIMAL,
+            )
+        elif "gemini-2.5-flash" in model_name:
+            thinking_config = types.ThinkingConfig(
+                thinking_budget=0,
+            )
+
+        return types.GenerateContentConfig(
+            temperature=0,
+            response_mime_type="application/json",
+            response_schema=JobExtractionResult,
+            thinking_config=thinking_config,
+            automatic_function_calling=(
+                types.AutomaticFunctionCallingConfig(disable=True)
+            ),
+            http_options=types.HttpOptions(
+                timeout=_gemini_timeout_ms(),
+            ),
+        )
+
     def extract(
         self,
         cleaned_text: str,
@@ -1104,17 +1148,18 @@ class ExtractionService:
         )
 
         try:
-            response = call_gemini_with_retry(
-                lambda: client.models.generate_content(
-                    model=self.model,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        temperature=0,
-                        response_mime_type="application/json",
-                        response_schema=JobExtractionResult,
-                    ),
+            # The bulk endpoint can call this method concurrently.  Give
+            # every extraction its own SDK client so a shared synchronous
+            # transport cannot serialize or deadlock otherwise independent
+            # requests.  The context manager also releases its HTTP pool.
+            with genai.Client(api_key=GEMINI_API_KEY) as request_client:
+                response = call_gemini_with_retry(
+                    lambda: request_client.models.generate_content(
+                        model=self.model,
+                        contents=prompt,
+                        config=self._generation_config(),
+                    )
                 )
-            )
 
         except Exception as e:
             raise LLMServiceError(

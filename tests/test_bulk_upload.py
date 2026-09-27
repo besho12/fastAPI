@@ -5,6 +5,7 @@ import threading
 import time
 
 import main
+from app.extraction import ExtractionService, _gemini_timeout_ms
 from app.pipeline import JobIngestionResult
 
 
@@ -109,3 +110,26 @@ def test_bulk_upload_counts_failed_status_as_an_error(monkeypatch):
     assert response["stored"] == 0
     assert response["errors"] == 1
     assert response["results"][0]["status"] == "failed"
+
+
+def test_extraction_config_is_bounded_and_uses_minimal_gemini_3_thinking(
+    monkeypatch,
+):
+    monkeypatch.setenv("GEMINI_REQUEST_TIMEOUT_SECONDS", "40")
+
+    config = ExtractionService(
+        model="gemini-3.5-flash-lite"
+    )._generation_config()
+
+    assert _gemini_timeout_ms() == 40_000
+    assert config.http_options.timeout == 40_000
+    assert config.automatic_function_calling.disable is True
+    assert config.thinking_config.thinking_level.value == "MINIMAL"
+
+
+def test_extraction_config_disables_thinking_for_gemini_25_flash():
+    config = ExtractionService(
+        model="gemini-2.5-flash"
+    )._generation_config()
+
+    assert config.thinking_config.thinking_budget == 0

@@ -591,6 +591,12 @@ class JobComparisonPipeline:
                         or error_message
                     )
 
+                logger.warning(
+                    "Bulk ingestion failed (file=%s): %s",
+                    original_file_name,
+                    error_message,
+                )
+
                 results.append(
                     JobIngestionResult(
                         file_name=(
@@ -602,6 +608,12 @@ class JobComparisonPipeline:
                 )
 
             except Exception as exc:
+
+                logger.warning(
+                    "Bulk ingestion failed unexpectedly (file=%s): %s",
+                    original_file_name,
+                    exc,
+                )
 
                 results.append(
                     JobIngestionResult(
