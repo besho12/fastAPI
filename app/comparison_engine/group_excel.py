@@ -10,13 +10,19 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from app.comparison_engine.group import JobGroupComparison
-from app.comparison_engine.models import Bucket, Direction
+from app.comparison_engine.models import (
+    BUCKET_LABEL,
+    CATEGORY_ORDER,
+    Bucket,
+    Direction,
+)
 
 
 NAVY = "1F3864"
 LIGHT_BLUE = "D9EAF7"
 LIGHT_RED = "FCE4E4"
 LIGHT_PURPLE = "F0E6F6"
+LIGHT_GREEN = "E2F0D9"
 
 
 def _header(sheet, row: int, labels: Iterable[str]) -> None:
@@ -38,6 +44,52 @@ def _fit(sheet, widths) -> None:
         sheet.column_dimensions[get_column_letter(column)].width = width
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = sheet.dimensions
+
+
+def _missing_summary(report) -> tuple[str, int]:
+    """Render one readable, category-grouped summary into a single cell."""
+
+    missing = [
+        finding
+        for finding in report.findings
+        if finding.direction == Direction.M_MINUS
+    ]
+
+    if not missing:
+        return "No missing requirements compared with the other jobs.", 1
+
+    lines = []
+    for category in CATEGORY_ORDER:
+        category_findings = [
+            finding
+            for finding in missing
+            if finding.category == category
+        ]
+        if not category_findings:
+            continue
+
+        lines.append(category.value.upper())
+        for finding in category_findings:
+            benchmark = (
+                f"seen in {finding.support_count} of "
+                f"{finding.applicable_reference_count} other jobs"
+                if finding.applicable_reference_count
+                else "benchmark availability not measurable"
+            )
+            priority = BUCKET_LABEL[finding.bucket]
+            lines.append(f"   • {finding.label}")
+            lines.append(f"      {priority} · {benchmark}")
+
+    # Excel cells have a 32,767-character limit.  Extremely large groups
+    # retain the complete row-level detail in "Per-job Differences".
+    text = "\n".join(lines)
+    if len(text) > 32_000:
+        text = (
+            text[:31_900].rsplit("\n", 1)[0]
+            + "\n… More items are available in Per-job Differences."
+        )
+
+    return text, text.count("\n") + 1
 
 
 def generate_group_summary_excel(group: JobGroupComparison) -> bytes:
@@ -95,6 +147,66 @@ def generate_group_summary_excel(group: JobGroupComparison) -> bytes:
                 cell.fill = PatternFill("solid", fgColor=LIGHT_PURPLE)
 
     _fit(overview, [18, 28, 18, 14, 14, 20, 21, 14, 14, 14])
+
+    company_summary = workbook.create_sheet("Company Missing Summary")
+    company_summary.sheet_view.showGridLines = False
+    _header(
+        company_summary,
+        1,
+        [
+            "Company",
+            "Job title",
+            "Job code",
+            "Compared with",
+            "Missing count",
+            "Missing compared with other companies",
+        ],
+    )
+    company_summary.row_dimensions[1].height = 32
+
+    for row, report in enumerate(group.reports, start=2):
+        summary, line_count = _missing_summary(report)
+        missing_count = sum(
+            1
+            for finding in report.findings
+            if finding.direction == Direction.M_MINUS
+        )
+        values = [
+            report.new_company_code or "Not specified",
+            report.new_job_title or "Not specified",
+            report.new_job_code or "Not specified",
+            report.reference_jobs_count,
+            missing_count,
+            summary,
+        ]
+
+        for column, value in enumerate(values, start=1):
+            cell = company_summary.cell(row=row, column=column, value=value)
+            cell.alignment = Alignment(
+                vertical="top",
+                horizontal="left",
+                wrap_text=True,
+            )
+
+        company_summary.cell(row=row, column=1).font = Font(
+            name="Calibri",
+            bold=True,
+            color=NAVY,
+        )
+        company_summary.cell(row=row, column=5).alignment = Alignment(
+            horizontal="center",
+            vertical="top",
+        )
+        company_summary.cell(row=row, column=6).fill = PatternFill(
+            "solid",
+            fgColor=LIGHT_RED if missing_count else LIGHT_GREEN,
+        )
+        company_summary.row_dimensions[row].height = min(
+            360,
+            max(36, line_count * 15),
+        )
+
+    _fit(company_summary, [18, 30, 18, 16, 15, 95])
 
     differences = workbook.create_sheet("Per-job Differences")
     differences.sheet_view.showGridLines = False

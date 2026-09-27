@@ -169,6 +169,7 @@ def test_group_summary_workbook_is_decision_first():
 
     assert workbook.sheetnames == [
         "Group Overview",
+        "Company Missing Summary",
         "Per-job Differences",
         "Concept Coverage",
     ]
@@ -176,6 +177,17 @@ def test_group_summary_workbook_is_decision_first():
     assert overview.max_row == 4
     assert overview.cell(2, 1).value == "A"
     assert overview.cell(2, 6).value >= 1
+
+    company_summary = workbook["Company Missing Summary"]
+    assert company_summary.max_row == 4
+    assert company_summary.cell(2, 1).value == "A"
+    assert company_summary.cell(2, 5).value == 2
+    missing_summary = company_summary.cell(2, 6).value
+    assert "LANGUAGE" in missing_summary
+    assert "   • Native English" in missing_summary
+    assert "COMPUTER SKILLS" in missing_summary
+    assert "   • Excel" in missing_summary
+    assert "seen in 2 of 2 other jobs" in missing_summary
 
     differences = workbook["Per-job Differences"]
     rows = list(differences.iter_rows(min_row=2, values_only=True))
