@@ -1,6 +1,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
+
 from io import BytesIO
 
 from typing import List, Optional
@@ -39,7 +42,7 @@ from app.preprocessing import Preprocessor
 
 from app.duplicate_detection import DuplicateDetectionService
 
-from app.database.connection import get_db
+from app.database.connection import SessionLocal, get_db
 
 from app.database.repositories import (
     JobRepository,
@@ -202,6 +205,17 @@ llm_service = LLMService()
 duplicate_detection_service = DuplicateDetectionService()
 
 
+def _bulk_ingestion_concurrency() -> int:
+    """Return a conservative, configurable ingestion worker limit."""
+
+    raw_value = os.getenv("BULK_INGESTION_CONCURRENCY", "4")
+
+    try:
+        return max(1, int(raw_value))
+    except (TypeError, ValueError):
+        return 4
+
+
 # ============================================================
 # PIPELINE FACTORY
 # ============================================================
@@ -230,6 +244,27 @@ def create_pipeline(db: Session) -> JobComparisonPipeline:
     )
 
 
+def _ingest_job_with_own_session(item: JobInput) -> JobIngestionResult:
+    """Ingest one document in a worker-owned SQLAlchemy session.
+
+    A Session must never be shared between the worker threads used by the
+    bulk endpoint.  Reusing ``ingest_jobs`` for a one-item list also keeps
+    the endpoint's existing per-file error response contract.
+    """
+
+    with SessionLocal() as worker_db:
+        pipeline = create_pipeline(worker_db)
+        return pipeline.ingest_jobs(
+            jobs=[
+                (
+                    item.raw_text,
+                    item.input_type,
+                    item.original_file_name,
+                )
+            ]
+        )[0]
+
+
 # ============================================================
 # BULK INGESTION
 # ============================================================
@@ -237,7 +272,6 @@ def create_pipeline(db: Session) -> JobComparisonPipeline:
 @app.post("/api/jobs/bulk-upload")
 async def bulk_upload_jobs(
     request: BulkJobIngestionRequest,
-    db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     """
@@ -265,20 +299,29 @@ async def bulk_upload_jobs(
     """
 
     try:
-        pipeline = create_pipeline(db)
-
-        jobs_to_ingest = [
-            (
-                item.raw_text,
-                item.input_type,
-                item.original_file_name,
+        # Extraction is the expensive part of this endpoint (one Gemini
+        # request per document).  Running independent documents serially
+        # made a three-file save take roughly three times as long and could
+        # exceed the reverse proxy timeout, surfacing as HTTP 504.  Bound the
+        # concurrency to respect provider limits, and give every worker its
+        # own SQLAlchemy Session because Session is not thread-safe.
+        semaphore = asyncio.Semaphore(
+            min(
+                _bulk_ingestion_concurrency(),
+                len(request.jobs),
             )
-            for item in request.jobs
-        ]
+        )
 
-        results: List[JobIngestionResult] = (
-            pipeline.ingest_jobs(
-                jobs=jobs_to_ingest,
+        async def ingest_one(item: JobInput) -> JobIngestionResult:
+            async with semaphore:
+                return await asyncio.to_thread(
+                    _ingest_job_with_own_session,
+                    item,
+                )
+
+        results: List[JobIngestionResult] = list(
+            await asyncio.gather(
+                *(ingest_one(item) for item in request.jobs)
             )
         )
 
@@ -297,7 +340,7 @@ async def bulk_upload_jobs(
         failed_count = sum(
             1
             for result in results
-            if result.status == "error"
+            if result.status in {"failed", "error"}
         )
 
         return {
