@@ -169,7 +169,7 @@ def test_group_summary_workbook_is_decision_first():
 
     assert workbook.sheetnames == [
         "Group Overview",
-        "Company Missing Summary",
+        "Company Comparison",
         "Per-job Differences",
         "Concept Coverage",
     ]
@@ -178,7 +178,7 @@ def test_group_summary_workbook_is_decision_first():
     assert overview.cell(2, 1).value == "A"
     assert overview.cell(2, 6).value >= 1
 
-    company_summary = workbook["Company Missing Summary"]
+    company_summary = workbook["Company Comparison"]
     assert company_summary.max_row == 4
     assert company_summary.cell(2, 1).value == "A"
     assert company_summary.cell(2, 5).value == 2
@@ -188,6 +188,12 @@ def test_group_summary_workbook_is_decision_first():
     assert "COMPUTER SKILLS" in missing_summary
     assert "   • Excel" in missing_summary
     assert "seen in 2 of 2 other jobs" in missing_summary
+    assert company_summary.cell(2, 7).value == 2
+    additional_summary = company_summary.cell(2, 8).value
+    assert "LANGUAGE" in additional_summary
+    assert "Arabic" in additional_summary
+    assert "COMPUTER SKILLS" in additional_summary
+    assert "Typing Speed" in additional_summary
 
     differences = workbook["Per-job Differences"]
     rows = list(differences.iter_rows(min_row=2, values_only=True))
@@ -196,6 +202,16 @@ def test_group_summary_workbook_is_decision_first():
         and row[2] == "Missing from this job"
         and row[3] == "Native English"
         for row in rows
+    )
+    company_a_directions = [row[2] for row in rows if row[0] == "A"]
+    first_additional = company_a_directions.index("Additional in this job")
+    assert all(
+        direction == "Missing from this job"
+        for direction in company_a_directions[:first_additional]
+    )
+    assert all(
+        direction == "Additional in this job"
+        for direction in company_a_directions[first_additional:]
     )
     workbook.close()
 

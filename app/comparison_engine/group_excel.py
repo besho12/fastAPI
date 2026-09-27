@@ -46,23 +46,28 @@ def _fit(sheet, widths) -> None:
     sheet.auto_filter.ref = sheet.dimensions
 
 
-def _missing_summary(report) -> tuple[str, int]:
-    """Render one readable, category-grouped summary into a single cell."""
+def _direction_summary(report, direction: Direction) -> tuple[str, int]:
+    """Render one readable, category-grouped direction into a single cell."""
 
-    missing = [
+    findings = [
         finding
         for finding in report.findings
-        if finding.direction == Direction.M_MINUS
+        if finding.direction == direction
     ]
 
-    if not missing:
-        return "No missing requirements compared with the other jobs.", 1
+    if not findings:
+        message = (
+            "No missing requirements compared with the other jobs."
+            if direction == Direction.M_MINUS
+            else "No additional requirements compared with the other jobs."
+        )
+        return message, 1
 
     lines = []
     for category in CATEGORY_ORDER:
         category_findings = [
             finding
-            for finding in missing
+            for finding in findings
             if finding.category == category
         ]
         if not category_findings:
@@ -70,8 +75,13 @@ def _missing_summary(report) -> tuple[str, int]:
 
         lines.append(category.value.upper())
         for finding in category_findings:
+            benchmark_prefix = (
+                "seen in"
+                if direction == Direction.M_MINUS
+                else "also seen in"
+            )
             benchmark = (
-                f"seen in {finding.support_count} of "
+                f"{benchmark_prefix} {finding.support_count} of "
                 f"{finding.applicable_reference_count} other jobs"
                 if finding.applicable_reference_count
                 else "benchmark availability not measurable"
@@ -148,7 +158,7 @@ def generate_group_summary_excel(group: JobGroupComparison) -> bytes:
 
     _fit(overview, [18, 28, 18, 14, 14, 20, 21, 14, 14, 14])
 
-    company_summary = workbook.create_sheet("Company Missing Summary")
+    company_summary = workbook.create_sheet("Company Comparison")
     company_summary.sheet_view.showGridLines = False
     _header(
         company_summary,
@@ -160,16 +170,30 @@ def generate_group_summary_excel(group: JobGroupComparison) -> bytes:
             "Compared with",
             "Missing count",
             "Missing compared with other companies",
+            "Additional count",
+            "Additional compared with other companies",
         ],
     )
     company_summary.row_dimensions[1].height = 32
 
     for row, report in enumerate(group.reports, start=2):
-        summary, line_count = _missing_summary(report)
+        missing_summary, missing_lines = _direction_summary(
+            report,
+            Direction.M_MINUS,
+        )
+        additional_summary, additional_lines = _direction_summary(
+            report,
+            Direction.M_PLUS,
+        )
         missing_count = sum(
             1
             for finding in report.findings
             if finding.direction == Direction.M_MINUS
+        )
+        additional_count = sum(
+            1
+            for finding in report.findings
+            if finding.direction == Direction.M_PLUS
         )
         values = [
             report.new_company_code or "Not specified",
@@ -177,7 +201,9 @@ def generate_group_summary_excel(group: JobGroupComparison) -> bytes:
             report.new_job_code or "Not specified",
             report.reference_jobs_count,
             missing_count,
-            summary,
+            missing_summary,
+            additional_count,
+            additional_summary,
         ]
 
         for column, value in enumerate(values, start=1):
@@ -201,12 +227,20 @@ def generate_group_summary_excel(group: JobGroupComparison) -> bytes:
             "solid",
             fgColor=LIGHT_RED if missing_count else LIGHT_GREEN,
         )
+        company_summary.cell(row=row, column=7).alignment = Alignment(
+            horizontal="center",
+            vertical="top",
+        )
+        company_summary.cell(row=row, column=8).fill = PatternFill(
+            "solid",
+            fgColor=LIGHT_PURPLE if additional_count else LIGHT_BLUE,
+        )
         company_summary.row_dimensions[row].height = min(
             360,
-            max(36, line_count * 15),
+            max(36, max(missing_lines, additional_lines) * 15),
         )
 
-    _fit(company_summary, [18, 30, 18, 16, 15, 95])
+    _fit(company_summary, [18, 30, 18, 16, 15, 78, 16, 78])
 
     differences = workbook.create_sheet("Per-job Differences")
     differences.sheet_view.showGridLines = False
@@ -227,9 +261,15 @@ def generate_group_summary_excel(group: JobGroupComparison) -> bytes:
     )
     row = 2
     for report in group.reports:
-        for finding in report.findings:
-            if finding.direction == Direction.ALIGNED:
-                continue
+        # Keep all missing rows together, followed by all additional rows.
+        # The engine's importance order remains intact within each block.
+        ordered_findings = [
+            finding
+            for direction in (Direction.M_MINUS, Direction.M_PLUS)
+            for finding in report.findings
+            if finding.direction == direction
+        ]
+        for finding in ordered_findings:
             difference = (
                 "Missing from this job"
                 if finding.direction == Direction.M_MINUS
@@ -257,6 +297,16 @@ def generate_group_summary_excel(group: JobGroupComparison) -> bytes:
                         else LIGHT_PURPLE
                     ),
                 )
+                if column == 3:
+                    cell.font = Font(
+                        name="Calibri",
+                        bold=True,
+                        color=(
+                            "9C0006"
+                            if finding.direction == Direction.M_MINUS
+                            else "7030A0"
+                        ),
+                    )
             row += 1
     if row == 2:
         differences.cell(row=2, column=1, value="No differences found.")
