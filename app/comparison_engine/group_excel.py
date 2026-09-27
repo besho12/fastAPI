@@ -23,6 +23,32 @@ LIGHT_BLUE = "D9EAF7"
 LIGHT_RED = "FCE4E4"
 LIGHT_PURPLE = "F0E6F6"
 LIGHT_GREEN = "E2F0D9"
+LIGHT_YELLOW = "FFF2CC"
+LIGHT_GREY = "E7E6E6"
+
+
+_GAP_RANK = {
+    Bucket.CRITICAL_GAP: 0,
+    Bucket.NOTABLE_GAP: 1,
+    Bucket.STANDARD_GAP: 2,
+    Bucket.MARKET_VARIATION: 3,
+}
+
+_ACTION_FILL = {
+    Bucket.CRITICAL_GAP: "F4CCCC",
+    Bucket.NOTABLE_GAP: "FCE4D6",
+    Bucket.STANDARD_GAP: LIGHT_YELLOW,
+    Bucket.MARKET_VARIATION: LIGHT_GREY,
+}
+
+_ACTION_TEXT = {
+    Bucket.CRITICAL_GAP: "Validate with the job owner and add if mandatory.",
+    Bucket.NOTABLE_GAP: "Review applicability with the job owner.",
+    Bucket.STANDARD_GAP: "Consider aligning with the standard job template.",
+    Bucket.MARKET_VARIATION: (
+        "Confirm whether this is an intentional company-specific difference."
+    ),
+}
 
 
 def _header(sheet, row: int, labels: Iterable[str]) -> None:
@@ -100,6 +126,121 @@ def _direction_summary(report, direction: Direction) -> tuple[str, int]:
         )
 
     return text, text.count("\n") + 1
+
+
+def _company_label(report, index: int) -> str:
+    return report.new_company_code or f"Job {index}"
+
+
+def _action_plan_rows(group: JobGroupComparison) -> list[dict]:
+    """Aggregate repeated per-company gaps into one row per concept."""
+
+    companies = [
+        _company_label(report, index)
+        for index, report in enumerate(group.reports, start=1)
+    ]
+    evidence_lookups = [
+        {item.concept_id: item for item in report.evidence}
+        for report in group.reports
+    ]
+    missing_finding_lookups = [
+        {
+            finding.concept_id: finding
+            for finding in report.findings
+            if finding.direction == Direction.M_MINUS
+        }
+        for report in group.reports
+    ]
+
+    concepts = []
+    seen = set()
+    for report in group.reports:
+        for evidence in report.evidence:
+            if evidence.concept_id not in seen:
+                seen.add(evidence.concept_id)
+                concepts.append(evidence)
+
+    rows = []
+    for concept in concepts:
+        present_companies = []
+        missing_companies = []
+        missing_findings = []
+
+        for company, evidence_lookup, finding_lookup in zip(
+            companies,
+            evidence_lookups,
+            missing_finding_lookups,
+        ):
+            evidence = evidence_lookup.get(concept.concept_id)
+            if evidence is None:
+                continue
+            if evidence.new_job_has:
+                present_companies.append(company)
+            else:
+                missing_companies.append(company)
+                finding = finding_lookup.get(concept.concept_id)
+                if finding is not None:
+                    missing_findings.append(finding)
+
+        # Fully aligned concepts need no standardisation decision.
+        if not present_companies or not missing_companies:
+            continue
+
+        missing_findings.sort(
+            key=lambda finding: (
+                _GAP_RANK.get(finding.bucket, 99),
+                -finding.priority_score,
+            )
+        )
+        leading = missing_findings[0] if missing_findings else None
+        bucket = leading.bucket if leading is not None else Bucket.MARKET_VARIATION
+        impact = next(
+            (
+                finding.business_impact
+                for finding in missing_findings
+                if finding.business_impact
+            ),
+            "No additional business-impact statement was generated.",
+        )
+        total = len(present_companies) + len(missing_companies)
+        coverage = len(present_companies) / total if total else None
+
+        rows.append(
+            {
+                "bucket": bucket,
+                "category": concept.category,
+                "requirement": concept.label,
+                "missing": missing_companies,
+                "present": present_companies,
+                "coverage": coverage,
+                "impact": impact,
+                "action": _ACTION_TEXT[bucket],
+            }
+        )
+
+    category_rank = {
+        category: index
+        for index, category in enumerate(CATEGORY_ORDER)
+    }
+    rows.sort(
+        key=lambda item: (
+            _GAP_RANK.get(item["bucket"], 99),
+            -len(item["missing"]),
+            category_rank.get(item["category"], 99),
+            item["requirement"].casefold(),
+        )
+    )
+    return rows
+
+
+def _heatmap_fill(score: Optional[float]) -> str:
+    if score is None:
+        return LIGHT_GREY
+    if score >= 0.8:
+        return LIGHT_GREEN
+    if score >= 0.5:
+        return LIGHT_YELLOW
+    return LIGHT_RED
 
 
 def generate_group_summary_excel(group: JobGroupComparison) -> bytes:
@@ -241,6 +382,181 @@ def generate_group_summary_excel(group: JobGroupComparison) -> bytes:
         )
 
     _fit(company_summary, [18, 30, 18, 16, 15, 78, 16, 78])
+
+    action_plan = workbook.create_sheet("Standardization Action Plan")
+    action_plan.sheet_view.showGridLines = False
+    _header(
+        action_plan,
+        1,
+        [
+            "Rank",
+            "Priority",
+            "Category",
+            "Requirement",
+            "Companies missing it",
+            "Companies containing it",
+            "Group coverage",
+            "Why it matters",
+            "Recommended decision",
+            "Decision",
+            "Owner",
+            "Due date",
+            "Notes",
+        ],
+    )
+    action_plan.row_dimensions[1].height = 34
+
+    action_rows = _action_plan_rows(group)
+    for row, item in enumerate(action_rows, start=2):
+        bucket = item["bucket"]
+        fill = _ACTION_FILL[bucket]
+        values = [
+            row - 1,
+            BUCKET_LABEL[bucket],
+            item["category"].value,
+            item["requirement"],
+            "\n".join(f"• {company}" for company in item["missing"]),
+            "\n".join(f"• {company}" for company in item["present"]),
+            (
+                f"{_percent(item['coverage'])} "
+                f"({len(item['present'])} of "
+                f"{len(item['present']) + len(item['missing'])})"
+            ),
+            item["impact"],
+            item["action"],
+            "",
+            "",
+            "",
+            "",
+        ]
+        for column, value in enumerate(values, start=1):
+            cell = action_plan.cell(row=row, column=column, value=value)
+            cell.alignment = Alignment(
+                vertical="top",
+                horizontal="center" if column in (1, 7, 12) else "left",
+                wrap_text=True,
+            )
+            cell.fill = PatternFill(
+                "solid",
+                fgColor=LIGHT_YELLOW if column >= 10 else fill,
+            )
+            if column in (2, 4):
+                cell.font = Font(name="Calibri", bold=True)
+
+        line_count = max(len(item["missing"]), len(item["present"]), 2)
+        action_plan.row_dimensions[row].height = min(
+            120,
+            max(36, line_count * 16),
+        )
+
+    if not action_rows:
+        action_plan.cell(
+            row=2,
+            column=1,
+            value="No standardization differences were identified.",
+        )
+
+    _fit(
+        action_plan,
+        [8, 23, 24, 38, 25, 25, 18, 42, 42, 22, 20, 16, 32],
+    )
+    action_plan.freeze_panes = "D2"
+
+    heatmap = workbook.create_sheet("Company Category Heatmap")
+    heatmap.sheet_view.showGridLines = False
+    _header(
+        heatmap,
+        1,
+        [
+            "Company",
+            "Job title",
+            "Overall alignment",
+            *[category.value for category in CATEGORY_ORDER],
+            "Missing total",
+            "Critical gaps",
+        ],
+    )
+    heatmap.row_dimensions[1].height = 42
+
+    for row, report in enumerate(group.reports, start=2):
+        company = _company_label(report, row - 1)
+        missing_total = sum(
+            1
+            for finding in report.findings
+            if finding.direction == Direction.M_MINUS
+        )
+        category_lookup = {
+            summary.category: summary
+            for summary in report.category_summaries
+        }
+
+        heatmap.cell(row=row, column=1, value=company)
+        heatmap.cell(
+            row=row,
+            column=2,
+            value=report.new_job_title or "Not specified",
+        )
+        overall = heatmap.cell(
+            row=row,
+            column=3,
+            value=_percent(report.alignment_score),
+        )
+        overall.fill = PatternFill(
+            "solid",
+            fgColor=_heatmap_fill(report.alignment_score),
+        )
+
+        for offset, category in enumerate(CATEGORY_ORDER, start=4):
+            summary = category_lookup.get(category)
+            score = summary.alignment_score if summary is not None else None
+            if summary is None:
+                value = "N/A"
+            else:
+                value = (
+                    f"{_percent(score)}\n"
+                    f"{summary.m_minus_count} missing · "
+                    f"{summary.m_plus_count} extra"
+                )
+            cell = heatmap.cell(row=row, column=offset, value=value)
+            cell.fill = PatternFill(
+                "solid",
+                fgColor=_heatmap_fill(score),
+            )
+
+        missing_cell = heatmap.cell(
+            row=row,
+            column=4 + len(CATEGORY_ORDER),
+            value=missing_total,
+        )
+        critical_cell = heatmap.cell(
+            row=row,
+            column=5 + len(CATEGORY_ORDER),
+            value=report.count_of(Bucket.CRITICAL_GAP),
+        )
+        if missing_total:
+            missing_cell.fill = PatternFill("solid", fgColor=LIGHT_RED)
+        if critical_cell.value:
+            critical_cell.fill = PatternFill("solid", fgColor="F4CCCC")
+
+        for column in range(1, 6 + len(CATEGORY_ORDER)):
+            cell = heatmap.cell(row=row, column=column)
+            cell.alignment = Alignment(
+                horizontal="center" if column != 2 else "left",
+                vertical="center",
+                wrap_text=True,
+            )
+        heatmap.cell(row=row, column=1).font = Font(
+            name="Calibri",
+            bold=True,
+            color=NAVY,
+        )
+        heatmap.row_dimensions[row].height = 44
+
+    _fit(
+        heatmap,
+        [18, 30, 18, *([22] * len(CATEGORY_ORDER)), 15, 15],
+    )
+    heatmap.freeze_panes = "C2"
 
     differences = workbook.create_sheet("Per-job Differences")
     differences.sheet_view.showGridLines = False

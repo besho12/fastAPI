@@ -170,6 +170,8 @@ def test_group_summary_workbook_is_decision_first():
     assert workbook.sheetnames == [
         "Group Overview",
         "Company Comparison",
+        "Standardization Action Plan",
+        "Company Category Heatmap",
         "Per-job Differences",
         "Concept Coverage",
     ]
@@ -194,6 +196,28 @@ def test_group_summary_workbook_is_decision_first():
     assert "Arabic" in additional_summary
     assert "COMPUTER SKILLS" in additional_summary
     assert "Typing Speed" in additional_summary
+
+    action_plan = workbook["Standardization Action Plan"]
+    assert action_plan.cell(1, 10).value == "Decision"
+    assert action_plan.cell(1, 11).value == "Owner"
+    action_rows = list(
+        action_plan.iter_rows(min_row=2, values_only=True)
+    )
+    english_action = next(
+        row for row in action_rows if row[3] == "Native English"
+    )
+    assert english_action[4] == "• A"
+    assert "• B" in english_action[5]
+    assert "• C" in english_action[5]
+    assert english_action[6] == "67% (2 of 3)"
+
+    heatmap = workbook["Company Category Heatmap"]
+    assert heatmap.max_row == 4
+    assert heatmap.cell(1, 7).value == "Language"
+    assert heatmap.cell(2, 1).value == "A"
+    assert "1 missing" in heatmap.cell(2, 7).value
+    assert "1 extra" in heatmap.cell(2, 7).value
+    assert "1 missing" in heatmap.cell(2, 8).value
 
     differences = workbook["Per-job Differences"]
     rows = list(differences.iter_rows(min_row=2, values_only=True))
