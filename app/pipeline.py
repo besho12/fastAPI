@@ -46,7 +46,6 @@ from app.comparison_engine import (
     GeminiGateway,
     GroupComparisonEngine,
     JobGroupComparison,
-    OpenAIGateway,
 )
 from app.comparison_engine import generate_comparison_excel as _generate_comparison_excel_v2
 from app.comparison_engine import generate_group_summary_excel
@@ -54,6 +53,7 @@ from app.comparison_engine.models import ComparisonResult as _ComparisonEngineRe
 from app.config import settings
 from app.discrepancy_excel import generate_discrepancy_excel
 from app.discrepancy_report import analyze_discrepancies
+from app.openai_gateway import OpenAIGateway
 from app.preprocessing import (
     PreprocessResult,
     Preprocessor,
