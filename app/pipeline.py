@@ -46,11 +46,14 @@ from app.comparison_engine import (
     GeminiGateway,
     GroupComparisonEngine,
     JobGroupComparison,
+    OpenAIGateway,
 )
 from app.comparison_engine import generate_comparison_excel as _generate_comparison_excel_v2
 from app.comparison_engine import generate_group_summary_excel
 from app.comparison_engine.models import ComparisonResult as _ComparisonEngineResult
-from app.llm import LLMService
+from app.config import settings
+from app.discrepancy_excel import generate_discrepancy_excel
+from app.discrepancy_report import analyze_discrepancies
 from app.preprocessing import (
     PreprocessResult,
     Preprocessor,
@@ -210,7 +213,7 @@ class JobComparisonPipeline:
     def __init__(
         self,
         extraction_service: ExtractionService,
-        llm_service: LLMService,
+        llm_service: Optional[Any] = None,
         preprocessor: Optional[
             Preprocessor
         ] = None,
@@ -257,17 +260,23 @@ class JobComparisonPipeline:
         # --------------------------------------------------------------
 
         try:
-            gateway = GeminiGateway()
+            if settings.LLM_PROVIDER == "gemini":
+                gateway = GeminiGateway()
+            else:
+                gateway = OpenAIGateway()
+            self._model_gateway = gateway
             self._comparison_engine = ComparisonEngine(gateway=gateway)
             self._group_comparison_engine = GroupComparisonEngine(
                 gateway=gateway
             )
         except Exception:
             logger.warning(
-                "GeminiGateway unavailable; comparison engine will run "
+                "%s gateway unavailable; comparison engine will run "
                 "in deterministic offline mode.",
+                settings.LLM_PROVIDER,
                 exc_info=True,
             )
+            self._model_gateway = None
             self._comparison_engine = ComparisonEngine(gateway=None)
             self._group_comparison_engine = GroupComparisonEngine(
                 gateway=None
@@ -636,6 +645,8 @@ class JobComparisonPipeline:
         self,
         job_code: str,
         company_code: str,
+        reference_company_codes: Optional[List[str]] = None,
+        include_discrepancy_report: bool = False,
     ) -> PipelineResult:
         """
         Compare the complete job-code group anchored by:
@@ -784,6 +795,45 @@ class JobComparisonPipeline:
             )
         )
 
+        if reference_company_codes is not None:
+            requested_codes: List[str] = []
+            for value in reference_company_codes:
+                normalized = self._normalize_company_code(value)
+                if normalized and normalized not in requested_codes:
+                    requested_codes.append(normalized)
+
+            if not requested_codes:
+                raise PipelineError(
+                    "reference_company_codes cannot be empty when supplied.",
+                    details={"stage": "reference_company_selection"},
+                )
+            if normalized_company_code in requested_codes:
+                raise PipelineError(
+                    "The target company cannot also be a reference company.",
+                    details={"stage": "reference_company_selection"},
+                )
+
+            references_by_company = {
+                self._normalize_company_code(job.company.company_code): job
+                for job in reference_jobs
+            }
+            missing_codes = [
+                code for code in requested_codes if code not in references_by_company
+            ]
+            if missing_codes:
+                raise PipelineError(
+                    "One or more requested reference companies were not found "
+                    f"for job code {normalized_job_code}: "
+                    + ", ".join(missing_codes),
+                    details={
+                        "stage": "reference_company_selection",
+                        "missing_company_codes": missing_codes,
+                    },
+                )
+            reference_jobs = [
+                references_by_company[code] for code in requested_codes
+            ]
+
         # --------------------------------------------------------------
         # LOG REFERENCE JOBS
         # --------------------------------------------------------------
@@ -852,6 +902,7 @@ class JobComparisonPipeline:
                 normalized_job_code
             ),
             group=group_comparison,
+            include_discrepancy_report=include_discrepancy_report,
         )
 
         return PipelineResult(
@@ -2305,6 +2356,7 @@ class JobComparisonPipeline:
         self,
         job_code: str,
         group: JobGroupComparison,
+        include_discrepancy_report: bool = False,
     ) -> Tuple[bytes, str]:
         """Generate a group overview and one full workbook per job."""
 
@@ -2323,6 +2375,53 @@ class JobComparisonPipeline:
                 ),
             )
         ]
+
+        if include_discrepancy_report:
+            if self._model_gateway is None or not hasattr(
+                self._model_gateway, "generate_model"
+            ):
+                raise PipelineError(
+                    "The discrepancy report was requested, but the configured "
+                    f"{settings.LLM_PROVIDER} gateway is unavailable. Check "
+                    "the provider API key and model settings.",
+                    details={"stage": "discrepancy_report"},
+                )
+
+            target_job = group.jobs[0]
+            reference_jobs = list(group.jobs[1:])
+            discrepancy = self._run_stage(
+                stage="discrepancy_analysis",
+                action=lambda: analyze_discrepancies(
+                    target_job=target_job,
+                    reference_jobs=reference_jobs,
+                    gateway=self._model_gateway,
+                ),
+                error_message=(
+                    f"{settings.LLM_PROVIDER.capitalize()} discrepancy "
+                    "analysis failed"
+                ),
+                details={
+                    "target_company_code": target_job.company.company_code,
+                    "reference_company_codes": [
+                        job.company.company_code for job in reference_jobs
+                    ],
+                },
+            )
+            target_code = self._safe_filename_component(
+                target_job.company.company_code,
+                "target_company",
+            )
+            excel_files.append(
+                (
+                    f"{target_code}_job_description_discrepancy_report.xlsx",
+                    self._run_stage(
+                        stage="discrepancy_excel",
+                        action=lambda: generate_discrepancy_excel(discrepancy),
+                        error_message="Discrepancy Excel generation failed",
+                        details={"target_company_code": target_code},
+                    ),
+                )
+            )
 
         for index, (target_job, report) in enumerate(
             zip(group.jobs, group.reports), start=1

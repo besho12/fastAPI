@@ -4,7 +4,8 @@ app/comparison/gemini.py
 A thin gateway around Gemini.
 
 CONTRACT
-- It returns parsed JSON, or it raises LLMUnavailable.
+- It returns parsed JSON or a validated Pydantic model, or it raises
+  LLMUnavailable.
 - It never interprets, never counts, never classifies.
 - It retries transient failures with backoff and a repair hint.
 
@@ -20,7 +21,11 @@ import logging
 import os
 import random
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Type, TypeVar
+
+from pydantic import BaseModel
+
+from app.comparison_engine.gateway import LLMUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +33,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_SEED = 7
 DEFAULT_MAX_ATTEMPTS = 1
+TModel = TypeVar("TModel", bound=BaseModel)
 
 
 def _comparison_timeout_ms() -> int:
@@ -37,10 +43,6 @@ def _comparison_timeout_ms() -> int:
     except (TypeError, ValueError):
         seconds = 20
     return max(5, seconds) * 1000
-
-
-class LLMUnavailable(RuntimeError):
-    """Raised when the model could not return usable JSON."""
 
 
 def _strip_code_fence(text: str) -> str:
@@ -55,7 +57,8 @@ def _strip_code_fence(text: str) -> str:
 class GeminiGateway:
     """
     Wraps google-genai. Injectable so the engine is testable without a
-    network call: pass any object exposing `generate_json`.
+    network call. It exposes both `generate_json` for the comparison engine
+    and `generate_model` for provider-neutral structured reports.
     """
 
     def __init__(
@@ -78,6 +81,8 @@ class GeminiGateway:
 
         if not api_key:
             raise LLMUnavailable("GEMINI_API_KEY is not configured.")
+        if not model:
+            raise LLMUnavailable("GEMINI_MODEL is not configured.")
 
         self._genai = genai
         self._api_key = api_key
@@ -88,6 +93,31 @@ class GeminiGateway:
 
         self.call_count = 0
         self.failure_count = 0
+
+    # ------------------------------------------------------------------
+
+    def generate_model(
+        self,
+        *,
+        system_instruction: str,
+        user_content: str,
+        response_schema: Type[TModel],
+        label: str = "gemini_call",
+    ) -> TModel:
+        """Generate and validate the same Pydantic contract as OpenAI."""
+
+        payload = self.generate_json(
+            system_instruction=system_instruction,
+            user_content=user_content,
+            response_schema=response_schema,
+            label=label,
+        )
+        try:
+            return response_schema.model_validate(payload)
+        except Exception as exc:
+            raise LLMUnavailable(
+                f"{label} returned data that failed schema validation: {exc}"
+            ) from exc
 
     # ------------------------------------------------------------------
 

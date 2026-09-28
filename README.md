@@ -5,12 +5,28 @@ jobs that share a `job_code`.
 
 ## Comparison workflow
 
-`POST /api/jobs/compare` keeps the desktop application's existing request:
+`POST /api/jobs/compare` remains compatible with the desktop application's
+existing request:
 
 ```json
 {
   "job_code": "CLERK-01",
   "company_code": "COMPANY-A"
+}
+```
+
+It can also select an exact peer set and request the discrepancy report:
+
+```json
+{
+  "job_code": "TCGNBFI010104-A",
+  "company_code": "LSURV2602",
+  "reference_company_codes": [
+    "LSURV2604",
+    "LSURV2608",
+    "LSURV2609"
+  ],
+  "include_discrepancy_report": true
 }
 ```
 
@@ -22,10 +38,50 @@ compares every job against all remaining jobs. The returned ZIP contains:
   and a concept-coverage matrix.
 - One detailed workbook per job showing missing, additional, and aligned
   requirements with benchmark evidence and an audit trail.
+- A target-company discrepancy workbook with Executive Summary, Criteria
+  Comparison, and Duty Gap Matrix sheets when requested.
 
 Counts, prevalence, missing/additional direction, and report buckets are
-calculated in Python. Gemini is limited to semantic clustering and materiality
-judgement, with deterministic fallbacks if it is unavailable.
+calculated in Python. OpenAI is limited to structured extraction, semantic
+clustering, materiality judgement, and the target-company narrative analysis;
+the comparison engine retains deterministic fallbacks if semantic model calls
+are unavailable.
+
+The frontend request does not change. To switch the complete workflow,
+including the discrepancy workbook, set `LLM_PROVIDER=openai` or
+`LLM_PROVIDER=gemini` on the server and recreate the web container.
+
+## OpenAI configuration
+
+Copy the relevant values from `.env.example` into the deployment `.env`:
+
+```env
+LLM_PROVIDER=openai
+OPENAI_API_KEY=your_project_api_key
+OPENAI_MODEL=gpt-6-astra
+OPENAI_REQUEST_TIMEOUT_SECONDS=90
+OPENAI_MAX_OUTPUT_TOKENS=16000
+```
+
+The API key must remain server-side and must not be committed to Git. After
+changing the server environment, recreate the web container so Compose reloads
+the values:
+
+```bash
+docker build -t jd-backend:latest .
+docker compose up -d --force-recreate web
+```
+
+To switch the complete workflow back to Gemini without changing the frontend:
+
+```env
+LLM_PROVIDER=gemini
+GEMINI_API_KEY=your_gemini_api_key
+GEMINI_MODEL=your_gemini_model
+GEMINI_COMPARISON_TIMEOUT_SECONDS=90
+```
+
+Removing `LLM_PROVIDER` does not select Gemini; the default provider is OpenAI.
 
 ## Tests
 

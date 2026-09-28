@@ -376,8 +376,19 @@ def test_compare_api_contract_stays_compatible_with_desktop_client(
     seen = {}
 
     class _Pipeline:
-        def compare_selected_job(self, job_code, company_code):
-            seen.update(job_code=job_code, company_code=company_code)
+        def compare_selected_job(
+            self,
+            job_code,
+            company_code,
+            reference_company_codes=None,
+            include_discrepancy_report=False,
+        ):
+            seen.update(
+                job_code=job_code,
+                company_code=company_code,
+                reference_company_codes=reference_company_codes,
+                include_discrepancy_report=include_discrepancy_report,
+            )
             return SimpleNamespace(
                 zip_bytes=b"PK-compatible-group-zip",
                 zip_filename="CLERK-01_all_jobs_comparison.zip",
@@ -400,7 +411,12 @@ def test_compare_api_contract_stays_compatible_with_desktop_client(
     assert "CLERK-01_all_jobs_comparison.zip" in response.headers[
         "content-disposition"
     ]
-    assert seen == {"job_code": "CLERK-01", "company_code": "A"}
+    assert seen == {
+        "job_code": "CLERK-01",
+        "company_code": "A",
+        "reference_company_codes": None,
+        "include_discrepancy_report": True,
+    }
 
 
 def test_single_job_group_returns_clean_no_benchmark_report():

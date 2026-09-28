@@ -34,7 +34,7 @@ from app.comparison_engine.evidence import (
     MAJORITY_THRESHOLD,
     MIN_DOCS_FOR_STATISTICAL_CLAIM,
 )
-from app.comparison_engine.gemini import LLMUnavailable
+from app.comparison_engine.gateway import LLMUnavailable
 from app.comparison_engine.models import (
     TIER_WEIGHT,
     BenchmarkStrength,

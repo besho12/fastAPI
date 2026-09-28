@@ -27,7 +27,7 @@ from typing import Dict, List, Mapping, Optional, Sequence
 
 from pydantic import BaseModel, Field
 
-from app.comparison_engine.gemini import LLMUnavailable
+from app.comparison_engine.gateway import LLMUnavailable
 from app.comparison_engine.models import (
     CATEGORY_CODE,
     Category,

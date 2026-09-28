@@ -16,6 +16,19 @@ load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL")
 
+# LLM provider used by the active extraction and comparison pipelines.
+# Gemini remains available as an explicit rollback option, but new
+# deployments use OpenAI by default.
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai").strip().lower()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-6-astra")
+OPENAI_REQUEST_TIMEOUT_SECONDS = int(
+    os.getenv("OPENAI_REQUEST_TIMEOUT_SECONDS", "90")
+)
+OPENAI_MAX_OUTPUT_TOKENS = int(
+    os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "16000")
+)
+
 QDRANT_PATH = os.getenv(
     "QDRANT_PATH",
     "qdrant_storage",
@@ -67,6 +80,13 @@ class Settings:
     # Gemini
     GEMINI_API_KEY = GEMINI_API_KEY
     GEMINI_MODEL = GEMINI_MODEL
+
+    # Active model provider / OpenAI
+    LLM_PROVIDER = LLM_PROVIDER
+    OPENAI_API_KEY = OPENAI_API_KEY
+    OPENAI_MODEL = OPENAI_MODEL
+    OPENAI_REQUEST_TIMEOUT_SECONDS = OPENAI_REQUEST_TIMEOUT_SECONDS
+    OPENAI_MAX_OUTPUT_TOKENS = OPENAI_MAX_OUTPUT_TOKENS
 
     # Qdrant
     QDRANT_PATH = QDRANT_PATH

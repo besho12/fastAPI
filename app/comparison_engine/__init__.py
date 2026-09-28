@@ -36,7 +36,9 @@ from app.comparison_engine.group import (
     JobGroupComparison,
 )
 from app.comparison_engine.group_excel import generate_group_summary_excel
-from app.comparison_engine.gemini import GeminiGateway, LLMUnavailable
+from app.comparison_engine.gateway import LLMUnavailable
+from app.comparison_engine.gemini import GeminiGateway
+from app.openai_gateway import OpenAIGateway
 from app.comparison_engine.models import (
     BUCKET_LABEL,
     BenchmarkStrength,
@@ -63,6 +65,7 @@ __all__ = [
     "GroupComparisonEngine",
     "JobGroupComparison",
     "LLMUnavailable",
+    "OpenAIGateway",
     "Tier",
     "compare",
     "generate_comparison_excel",

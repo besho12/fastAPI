@@ -36,8 +36,6 @@ from app.schemas import InputType
 
 from app.extraction import ExtractionService
 
-from app.llm import LLMService
-
 from app.preprocessing import Preprocessor
 
 from app.duplicate_detection import DuplicateDetectionService
@@ -174,6 +172,22 @@ class JobComparisonRequest(BaseModel):
         min_length=1,
     )
 
+    reference_company_codes: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Optional exact peer-company selection. When omitted, all other "
+            "companies with the same job code are used."
+        ),
+    )
+
+    include_discrepancy_report: bool = Field(
+        default=True,
+        description=(
+            "Include the OpenAI-analyzed target-company discrepancy workbook "
+            "in the returned ZIP."
+        ),
+    )
+
 
 class JobAnalysisRequest(BaseModel):
     """
@@ -199,8 +213,6 @@ class JobAnalysisRequest(BaseModel):
 preprocessor = Preprocessor()
 
 extraction_service = ExtractionService()
-
-llm_service = LLMService()
 
 duplicate_detection_service = DuplicateDetectionService()
 
@@ -234,7 +246,6 @@ def create_pipeline(db: Session) -> JobComparisonPipeline:
 
     return JobComparisonPipeline(
         extraction_service=extraction_service,
-        llm_service=llm_service,
         preprocessor=preprocessor,
         db_session=db,
         job_repository=job_repository,
@@ -413,6 +424,8 @@ async def compare_selected_job(
         result = pipeline.compare_selected_job(
             job_code=job_code,
             company_code=company_code,
+            reference_company_codes=request.reference_company_codes,
+            include_discrepancy_report=request.include_discrepancy_report,
         )
 
         if not result.zip_bytes:
