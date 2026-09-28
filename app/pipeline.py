@@ -5,6 +5,7 @@ import re
 import uuid
 import zipfile
 
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
 from io import BytesIO
 from typing import (
@@ -52,7 +53,10 @@ from app.comparison_engine import generate_group_summary_excel
 from app.comparison_engine.models import ComparisonResult as _ComparisonEngineResult
 from app.config import settings
 from app.discrepancy_excel import generate_discrepancy_excel
-from app.discrepancy_report import analyze_discrepancies
+from app.discrepancy_report import (
+    JobDescriptionDiscrepancyReport,
+    analyze_discrepancies,
+)
 from app.openai_gateway import OpenAIGateway
 from app.preprocessing import (
     PreprocessResult,
@@ -267,7 +271,11 @@ class JobComparisonPipeline:
             self._model_gateway = gateway
             self._comparison_engine = ComparisonEngine(gateway=gateway)
             self._group_comparison_engine = GroupComparisonEngine(
-                gateway=gateway
+                gateway=gateway,
+                use_model_materiality=not (
+                    settings.LLM_PROVIDER == "openai"
+                    and settings.OPENAI_FAST_COMPARISON
+                ),
             )
         except Exception:
             logger.warning(
@@ -854,15 +862,52 @@ class JobComparisonPipeline:
         # --------------------------------------------------------------
 
         group_jobs = [selected_job, *reference_jobs]
-        group_comparison = self._run_stage(
-            stage="group_comparison_engine",
-            action=lambda: self._group_comparison_engine.run(group_jobs),
-            error_message="Group comparison engine failed",
-            details={
-                "job_code": normalized_job_code,
-                "job_count": len(group_jobs),
-            },
-        )
+
+        # The target discrepancy report depends only on the selected source
+        # documents, not on the group comparison result.  Running it beside
+        # semantic clustering/materiality removes one full model round trip
+        # from the user-visible critical path while preserving both outputs.
+        discrepancy_executor: Optional[ThreadPoolExecutor] = None
+        discrepancy_future: Optional[
+            Future[JobDescriptionDiscrepancyReport]
+        ] = None
+        if include_discrepancy_report and self._model_gateway is not None:
+            discrepancy_executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="discrepancy-analysis",
+            )
+            discrepancy_future = discrepancy_executor.submit(
+                self._analyze_discrepancy_report,
+                selected_job,
+                reference_jobs,
+            )
+
+        try:
+            # The installed client only consumes the discrepancy workbook.
+            # Build the compatibility/history report deterministically so the
+            # only provider round trip on this path is the requested report.
+            comparison_engine = (
+                GroupComparisonEngine(gateway=None)
+                if include_discrepancy_report
+                else self._group_comparison_engine
+            )
+            group_comparison = self._run_stage(
+                stage="group_comparison_engine",
+                action=lambda: comparison_engine.run(group_jobs),
+                error_message="Group comparison engine failed",
+                details={
+                    "job_code": normalized_job_code,
+                    "job_count": len(group_jobs),
+                },
+            )
+            discrepancy_report = (
+                discrepancy_future.result()
+                if discrepancy_future is not None
+                else None
+            )
+        finally:
+            if discrepancy_executor is not None:
+                discrepancy_executor.shutdown(wait=True, cancel_futures=True)
         report = group_comparison.reports[0]
 
         # --------------------------------------------------------------
@@ -903,6 +948,7 @@ class JobComparisonPipeline:
             ),
             group=group_comparison,
             include_discrepancy_report=include_discrepancy_report,
+            discrepancy_report=discrepancy_report,
         )
 
         return PipelineResult(
@@ -2357,6 +2403,9 @@ class JobComparisonPipeline:
         job_code: str,
         group: JobGroupComparison,
         include_discrepancy_report: bool = False,
+        discrepancy_report: Optional[
+            JobDescriptionDiscrepancyReport
+        ] = None,
     ) -> Tuple[bytes, str]:
         """Generate a group overview and one full workbook per job."""
 
@@ -2364,17 +2413,7 @@ class JobComparisonPipeline:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         job_code_safe = self._safe_filename_component(job_code, "job_group")
 
-        excel_files: List[Tuple[str, bytes]] = [
-            (
-                f"{job_code_safe}_group_summary.xlsx",
-                self._run_stage(
-                    stage="group_summary_excel",
-                    action=lambda: generate_group_summary_excel(group),
-                    error_message="Group summary Excel generation failed",
-                    details={"job_count": len(group.jobs)},
-                ),
-            )
-        ]
+        excel_files: List[Tuple[str, bytes]] = []
 
         if include_discrepancy_report:
             if self._model_gateway is None or not hasattr(
@@ -2389,23 +2428,13 @@ class JobComparisonPipeline:
 
             target_job = group.jobs[0]
             reference_jobs = list(group.jobs[1:])
-            discrepancy = self._run_stage(
-                stage="discrepancy_analysis",
-                action=lambda: analyze_discrepancies(
-                    target_job=target_job,
-                    reference_jobs=reference_jobs,
-                    gateway=self._model_gateway,
-                ),
-                error_message=(
-                    f"{settings.LLM_PROVIDER.capitalize()} discrepancy "
-                    "analysis failed"
-                ),
-                details={
-                    "target_company_code": target_job.company.company_code,
-                    "reference_company_codes": [
-                        job.company.company_code for job in reference_jobs
-                    ],
-                },
+            discrepancy = (
+                discrepancy_report
+                if discrepancy_report is not None
+                else self._analyze_discrepancy_report(
+                    target_job,
+                    reference_jobs,
+                )
             )
             target_code = self._safe_filename_component(
                 target_job.company.company_code,
@@ -2413,7 +2442,7 @@ class JobComparisonPipeline:
             )
             excel_files.append(
                 (
-                    f"{target_code}_job_description_discrepancy_report.xlsx",
+                    "Company_job_description_discrepancy_report.xlsx",
                     self._run_stage(
                         stage="discrepancy_excel",
                         action=lambda: generate_discrepancy_excel(discrepancy),
@@ -2423,38 +2452,80 @@ class JobComparisonPipeline:
                 )
             )
 
-        for index, (target_job, report) in enumerate(
-            zip(group.jobs, group.reports), start=1
-        ):
-            references = [
-                job
-                for job in group.jobs
-                if str(job.job_id) != str(target_job.job_id)
-            ]
-            company_code = self._safe_filename_component(
-                target_job.company.company_code,
-                f"job_{index}",
-            )
-            job_id = self._safe_filename_component(
-                str(target_job.job_id), f"job_{index}"
-            )
+        else:
             excel_files.append(
                 (
-                    f"jobs/{index:02d}_{company_code}_{job_id}_comparison.xlsx",
-                    self._generate_excel(
-                        report=report,
-                        new_job=target_job,
-                        reference_jobs=references,
+                    f"{job_code_safe}_group_summary.xlsx",
+                    self._run_stage(
+                        stage="group_summary_excel",
+                        action=lambda: generate_group_summary_excel(group),
+                        error_message="Group summary Excel generation failed",
+                        details={"job_count": len(group.jobs)},
                     ),
                 )
             )
+            for index, (target_job, report) in enumerate(
+                zip(group.jobs, group.reports), start=1
+            ):
+                references = [
+                    job
+                    for job in group.jobs
+                    if str(job.job_id) != str(target_job.job_id)
+                ]
+                company_code = self._safe_filename_component(
+                    target_job.company.company_code,
+                    f"job_{index}",
+                )
+                job_id = self._safe_filename_component(
+                    str(target_job.job_id), f"job_{index}"
+                )
+                excel_files.append(
+                    (
+                        f"jobs/{index:02d}_{company_code}_{job_id}_comparison.xlsx",
+                        self._generate_excel(
+                            report=report,
+                            new_job=target_job,
+                            reference_jobs=references,
+                        ),
+                    )
+                )
 
         zip_bytes = self._generate_zip(excel_files=excel_files)
         zip_filename = (
-            f"{job_code_safe}_{timestamp}_{unique_id}_"
-            "all_jobs_comparison.zip"
+            "Company_job_description_discrepancy_report.zip"
+            if include_discrepancy_report
+            else (
+                f"{job_code_safe}_{timestamp}_{unique_id}_"
+                "all_jobs_comparison.zip"
+            )
         )
         return zip_bytes, zip_filename
+
+    def _analyze_discrepancy_report(
+        self,
+        target_job: JobDescription,
+        reference_jobs: List[JobDescription],
+    ) -> JobDescriptionDiscrepancyReport:
+        """Run and consistently wrap the provider-backed discrepancy call."""
+
+        return self._run_stage(
+            stage="discrepancy_analysis",
+            action=lambda: analyze_discrepancies(
+                target_job=target_job,
+                reference_jobs=reference_jobs,
+                gateway=self._model_gateway,
+            ),
+            error_message=(
+                f"{settings.LLM_PROVIDER.capitalize()} discrepancy "
+                "analysis failed"
+            ),
+            details={
+                "target_company_code": target_job.company.company_code,
+                "reference_company_codes": [
+                    job.company.company_code for job in reference_jobs
+                ],
+            },
+        )
 
     def _generate_comparison_package(
         self,

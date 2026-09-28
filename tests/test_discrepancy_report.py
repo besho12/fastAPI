@@ -164,21 +164,23 @@ def test_group_zip_can_include_discrepancy_workbook():
     pipeline = object.__new__(JobComparisonPipeline)
     pipeline._model_gateway = _Gateway()
 
-    payload, _ = pipeline._generate_group_comparison_package(
+    payload, filename = pipeline._generate_group_comparison_package(
         "TCGNBFI010104-A",
         group,
         include_discrepancy_report=True,
     )
 
+    assert filename == "Company_job_description_discrepancy_report.zip"
     with ZipFile(BytesIO(payload)) as archive:
         assert (
-            "LSURV2602_job_description_discrepancy_report.xlsx"
+            "Company_job_description_discrepancy_report.xlsx"
             in archive.namelist()
         )
+        assert len(archive.namelist()) == 1
         workbook = load_workbook(
             BytesIO(
                 archive.read(
-                    "LSURV2602_job_description_discrepancy_report.xlsx"
+                    "Company_job_description_discrepancy_report.xlsx"
                 )
             ),
             read_only=True,
@@ -189,3 +191,26 @@ def test_group_zip_can_include_discrepancy_workbook():
             "Duty Gap Matrix",
         ]
         workbook.close()
+
+
+def test_group_zip_reuses_precomputed_discrepancy_report():
+    jobs = _jobs()
+    group = GroupComparisonEngine().run(jobs)
+    gateway = _Gateway()
+    pipeline = object.__new__(JobComparisonPipeline)
+    pipeline._model_gateway = gateway
+
+    payload, _ = pipeline._generate_group_comparison_package(
+        "TCGNBFI010104-A",
+        group,
+        include_discrepancy_report=True,
+        discrepancy_report=_report(),
+    )
+
+    assert gateway.calls == []
+    with ZipFile(BytesIO(payload)) as archive:
+        assert (
+            "Company_job_description_discrepancy_report.xlsx"
+            in archive.namelist()
+        )
+        assert len(archive.namelist()) == 1

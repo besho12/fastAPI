@@ -183,8 +183,8 @@ class JobComparisonRequest(BaseModel):
     include_discrepancy_report: bool = Field(
         default=True,
         description=(
-            "Include the OpenAI-analyzed target-company discrepancy workbook "
-            "in the returned ZIP."
+            "Return the OpenAI-analyzed target-company discrepancy workbook "
+            "as the only file in the ZIP."
         ),
     )
 

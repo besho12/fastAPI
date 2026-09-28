@@ -64,8 +64,13 @@ class JobGroupComparison(BaseModel):
 class GroupComparisonEngine:
     """Compare every job in a job-code group against all remaining jobs."""
 
-    def __init__(self, gateway: Optional[Any] = None) -> None:
+    def __init__(
+        self,
+        gateway: Optional[Any] = None,
+        use_model_materiality: bool = True,
+    ) -> None:
         self.gateway = gateway
+        self.use_model_materiality = use_model_materiality
 
     def run(self, jobs: Sequence[Any]) -> JobGroupComparison:
         group_jobs = list(jobs or [])
@@ -147,7 +152,8 @@ class GroupComparisonEngine:
                     materiality_inputs[item.concept_id] = item
 
         verdicts: Dict[str, MaterialityVerdict] = rate_materiality(
-            list(materiality_inputs.values()), gateway=self.gateway
+            list(materiality_inputs.values()),
+            gateway=(self.gateway if self.use_model_materiality else None),
         )
 
         if self.gateway is not None:

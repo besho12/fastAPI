@@ -162,6 +162,16 @@ def test_semantic_clustering_uses_one_request_for_the_whole_group():
     assert gateway.labels.count("materiality") == 1
 
 
+def test_fast_group_comparison_uses_heuristic_materiality():
+    gateway = _CountingGateway()
+    GroupComparisonEngine(
+        gateway=gateway,
+        use_model_materiality=False,
+    ).run(_three_jobs())
+
+    assert gateway.labels == ["clustering[group]"]
+
+
 def test_group_summary_workbook_is_decision_first():
     group = GroupComparisonEngine().run(_three_jobs())
     payload = generate_group_summary_excel(group)

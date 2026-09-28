@@ -28,6 +28,8 @@ class OpenAIGateway:
         model: Optional[str] = None,
         timeout_seconds: Optional[int] = None,
         max_output_tokens: Optional[int] = None,
+        reasoning_effort: Optional[str] = None,
+        max_retries: Optional[int] = None,
     ) -> None:
         self.api_key = api_key or settings.OPENAI_API_KEY
         self.model = model or settings.OPENAI_MODEL
@@ -38,6 +40,19 @@ class OpenAIGateway:
         self.max_output_tokens = max(
             256,
             int(max_output_tokens or settings.OPENAI_MAX_OUTPUT_TOKENS),
+        )
+        self.reasoning_effort = (
+            reasoning_effort
+            if reasoning_effort is not None
+            else settings.OPENAI_REASONING_EFFORT
+        ).strip().lower()
+        self.max_retries = max(
+            0,
+            int(
+                max_retries
+                if max_retries is not None
+                else settings.OPENAI_MAX_RETRIES
+            ),
         )
         self.call_count = 0
         self.failure_count = 0
@@ -66,11 +81,11 @@ class OpenAIGateway:
             with OpenAI(
                 api_key=self.api_key,
                 timeout=self.timeout_seconds,
-                max_retries=2,
+                max_retries=self.max_retries,
             ) as client:
-                response = client.responses.parse(
-                    model=self.model,
-                    input=[
+                request: Dict[str, Any] = {
+                    "model": self.model,
+                    "input": [
                         {
                             "role": "system",
                             "content": system_instruction,
@@ -80,9 +95,17 @@ class OpenAIGateway:
                             "content": user_content,
                         },
                     ],
-                    text_format=response_schema,
-                    max_output_tokens=self.max_output_tokens,
-                    store=False,
+                    "text_format": response_schema,
+                    "max_output_tokens": self.max_output_tokens,
+                    "store": False,
+                }
+                if self.reasoning_effort:
+                    request["reasoning"] = {
+                        "effort": self.reasoning_effort,
+                    }
+
+                response = client.responses.parse(
+                    **request,
                 )
 
             if getattr(response, "status", None) != "completed":
