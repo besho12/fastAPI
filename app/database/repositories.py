@@ -642,7 +642,12 @@ class JobRepository:
         job_code: str,
     ) -> list[Job]:
         """
-        Return ALL jobs sharing the same normalized job_code.
+        Return the current job for each company sharing the job code.
+
+        Multiple stored versions are allowed for the same
+        job_code + company_code.  Comparison uses the newest version by
+        record_created_at (then job_id as a deterministic tie-breaker), so
+        historical versions do not appear as duplicate peer companies.
 
         IMPORTANT:
         company_code is intentionally NOT used here.
@@ -685,13 +690,28 @@ class JobRepository:
                     Job.additional_information
                 ),
             )
+            .order_by(
+                Job.record_created_at.desc(),
+                Job.job_id.desc(),
+            )
         )
 
-        return list(
+        rows = list(
             self.db.execute(
                 stmt
             ).scalars().all()
         )
+
+        current_jobs: list[Job] = []
+        seen_company_codes: set[str] = set()
+        for row in rows:
+            company_code = _normalize_company_code(row.company_code)
+            if company_code is None or company_code in seen_company_codes:
+                continue
+            seen_company_codes.add(company_code)
+            current_jobs.append(row)
+
+        return current_jobs
 
     # ======================================================================
     # GET JOB BY JOB CODE + COMPANY CODE
@@ -703,7 +723,7 @@ class JobRepository:
         company_code: str,
     ) -> Optional[Job]:
         """
-        Return the specific job identified by:
+        Return the newest stored version identified by:
 
             job_code + company_code
 
@@ -759,6 +779,11 @@ class JobRepository:
                     Job.reports
                 ),
             )
+            .order_by(
+                Job.record_created_at.desc(),
+                Job.job_id.desc(),
+            )
+            .limit(1)
         )
 
         return self.db.execute(

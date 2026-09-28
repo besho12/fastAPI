@@ -34,6 +34,10 @@ The company identifies the anchor job, but comparison covers the complete
 job-code group. The service performs semantic concept clustering once, then
 compares every job against all remaining jobs. The returned ZIP contains:
 
+When multiple stored versions share the same `job_code + company_code`, the
+newest version is treated as current for comparison. Older versions remain in
+the database as history and are not duplicated in the peer group.
+
 - A group-summary workbook with per-job counts, all actionable differences,
   and a concept-coverage matrix.
 - One detailed workbook per job showing missing, additional, and aligned
